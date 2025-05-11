@@ -3,14 +3,13 @@
 
 VIRT_COUNT = 3
 BASE_NETWORK = "10.10.10."
-BASE_IP = 140  # Start IP
+BASE_IP = 140
 SSH_USER = "vagrant"
 
 Vagrant.configure("2") do |config|
   config.vm.box = "generic/alpine38"
   config.ssh.insert_key = false
 
-  # IP prepairimg
   vm_ips = (1..VIRT_COUNT).map { |i| "#{BASE_NETWORK}#{BASE_IP + i}" }
 
   (1..VIRT_COUNT).each do |i|
@@ -21,58 +20,67 @@ Vagrant.configure("2") do |config|
       sftp.vm.hostname = "sftp#{i}"
       sftp.vm.network "private_network", ip: current_ip
       
-      # SSH ke
-      sftp.vm.provision "file", source: "keys/", destination: "/home/#{SSH_USER}/.ssh/"
-      
-      # Main script
+      # SSH Key copy to machines
+      sftp.vm.provision "file", source: "keys/sftp_key", destination: "/tmp/sftp_key"
+      sftp.vm.provision "file", source: "keys/sftp_key.pub", destination: "/tmp/sftp_key.pub"
+
+      # Main
       sftp.vm.provision "shell", inline: <<-SHELL
-        # Create dir
-        mkdir -p /home/#{SSH_USER}/uploads
-        chown -R #{SSH_USER}:#{SSH_USER} /home/#{SSH_USER}
-
-        # Install
-        apk update
-        apk add openssh-server rkhunter fail2ban sudo shadow
-        apk add --no-cache openssh-keygen
-
-        # SSH conf
-        sudo -u #{SSH_USER} mkdir -p /home/#{SSH_USER}/.ssh
-        cat /home/#{SSH_USER}/.ssh/sftp_key.pub >> /home/#{SSH_USER}/.ssh/authorized_keys
+        # Setup SSH keys
+        mkdir -p /home/#{SSH_USER}/.ssh
+        mv /tmp/sftp_key* /home/#{SSH_USER}/.ssh/
         chmod 700 /home/#{SSH_USER}/.ssh
-        chmod 600 /home/#{SSH_USER}/.ssh/authorized_keys
+        chmod 600 /home/#{SSH_USER}/.ssh/sftp_key
+        chmod 644 /home/#{SSH_USER}/.ssh/sftp_key.pub
+        cat /home/#{SSH_USER}/.ssh/sftp_key.pub >> /home/#{SSH_USER}/.ssh/authorized_keys
+        chown -R #{SSH_USER}:#{SSH_USER} /home/#{SSH_USER}/.ssh
 
-        # SSH server conf
+        mkdir -p /home/#{SSH_USER}/uploads
+        chown #{SSH_USER}:#{SSH_USER} /home/#{SSH_USER}/uploads
+
+        # Installing 
+        apk update
+        apk add openssh-server sudo shadow fail2ban wget xz --repository=http://dl-cdn.alpinelinux.org/alpine/v3.8/community
+
+        # SSH
         sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
         sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config
         echo "Protocol 2" >> /etc/ssh/sshd_config
 
-        # Restart SSH
+        # Conf fail2ban
+        mkdir -p /var/run/fail2ban
+        cat << EOF > /etc/fail2ban/jail.d/sshd.conf
+[sshd]
+enabled = true
+logpath = /var/log/messages
+EOF
         rc-service sshd restart
-
-        # join susidy
-        echo "#{neighbors.join(' ')}" > /home/#{SSH_USER}/neighbors.conf
-
-        # Security setup
-        rkhunter --update
-        rkhunter --propupd
-        rkhunter --check --sk
-
-        # Setup fail2ban
-        cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
         rc-service fail2ban start
         rc-update add fail2ban
 
-        # Scheduler
-        echo "*/5 * * * * /home/#{SSH_USER}/scheduler.sh" | crontab -u #{SSH_USER} -
+        # Install rkhunter and conf
+        apk add --no-cache perl
+        wget https://downloads.sourceforge.net/project/rkhunter/rkhunter/1.4.6/rkhunter-1.4.6.tar.gz
+        tar xvf rkhunter-1.4.6.tar.gz
+        cd rkhunter-1.4.6
+        ./installer.sh --layout default --install
+        chmod 755 /usr/local/bin/rkhunter
+        chmod +x /usr/local/bin/rkhunter
+        rkhunter --update
+        rkhunter --propupd
+
+        # Neighbors config
+        echo "#{neighbors.join(' ')}" > /home/#{SSH_USER}/neighbors.conf
+        chown #{SSH_USER}:#{SSH_USER} /home/#{SSH_USER}/neighbors.conf
+        chmod 644 /home/#{SSH_USER}/neighbors.conf
       SHELL
 
-      # Copy upload script
+      # scheduler
       sftp.vm.provision "file", source: "scheduler.sh", destination: "/home/#{SSH_USER}/scheduler.sh"
-      
-      # Set permissions
       sftp.vm.provision "shell", inline: <<-SHELL
         chmod +x /home/#{SSH_USER}/scheduler.sh
         chown #{SSH_USER}:#{SSH_USER} /home/#{SSH_USER}/scheduler.sh
+        echo "*/5 * * * * /home/#{SSH_USER}/scheduler.sh" | crontab -u #{SSH_USER} -
       SHELL
     end
   end
